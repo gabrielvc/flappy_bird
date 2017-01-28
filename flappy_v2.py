@@ -80,21 +80,15 @@ def form_state(dic):
 def heuristique(state):
     r=np.random.rand()
     if state[9]> state[13] and r>.05:
-        #print('entrei no 1')
         return 119
     if state[9]< state[12]:
-        #print('entrei no 2')
         return None
     if  state[9]> state[12] and r>1-((state[12]-state[9])/(state[12]-state[13]))*1 and state[11]>0:
-        #print(((state[0,3]-state[0,0])/(state[0,3]-state[0,4])))
-        #print('entrei no 3')
         return 119
     if state[11]<10 and r>.9:
-        #print('entrei no 4')
         return 119
 
     if state[9]< state[12] and r>.4:
-        #print('entrei no 5')
         return 119
     return None
 
@@ -129,12 +123,6 @@ def play(p, model):
         #formation du nouveau etat
         new_state =   update_state(p,action,state)
 
-        #update
-        q_new =  model.predict(new_state.reshape((1, -1))).reshape(2)
-        q[action] = q[action] + alpha * (reward + gamma * np.max(q_new) - q[action])
-
-        #nouveau fit
-        model.fit(state.reshape((1,-1)), q.reshape((1,-1)), verbose=1)
 
 def jeu_get_reward(p,action):
     r =p.act(action)
