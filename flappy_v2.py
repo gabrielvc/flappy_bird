@@ -1,4 +1,4 @@
-##version avec replay de l'algo
+#Deep Q net for flappy bird
 
 import random
 from ple.games.flappybird import FlappyBird
@@ -6,56 +6,124 @@ from ple import PLE
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 import numpy as np
+from scipy import misc, ndimage
+
+from collections import deque
+from keras import initializations
+from keras.initializations import normal, identity
+from keras.models import model_from_json
 from keras.models import Sequential
-from keras.layers.core import Dense, Dropout, Activation
-from keras.optimizers import RMSprop, sgd, adam
-from keras.layers.recurrent import LSTM
 from keras.models import load_model
+from keras.layers.core import Dense, Dropout, Activation, Flatten
+from keras.layers.convolutional import Convolution2D, MaxPooling2D
+from keras.optimizers import SGD , Adam
 
 
-# charge le jeu, version avec et sans affichage graphique
+
+# Load two types of game, one with display of the game being played and other used for training
 
 game = FlappyBird()
-ps = PLE(game,fps=30, frame_skip=2, force_fps=False, display_screen=True,num_steps=1)
+ps = PLE(game,fps=30, frame_skip=1, force_fps=False, display_screen=True,num_steps=1)
 ps.init()
-pws = PLE(game,fps=30, frame_skip=2, force_fps=False, display_screen=False,num_steps=1)
+pws = PLE(game,fps=30, frame_skip=1, force_fps=True, display_screen=False,num_steps=1)
 pws.init()
 
 
 #creation du modele
 
-#model=load_model("model_flappyv2.dqf")
-model = Sequential()
-#
-model.add(Dense(400, init='lecun_uniform', input_shape=(17,)))
+
+# model=load_model("model_flappy_image.dqf")
+model=Sequential()
+model.add(Convolution2D(32, 6, 6, subsample=(4,4),init='lecun_uniform', border_mode='same',input_shape=(4,60,100)))
 model.add(Activation('relu'))
-model.add(Dropout(0.2))
-model.add(Dense(500, init='lecun_uniform'))
+model.add(Convolution2D(64, 4, 4, subsample=(2,2),init='lecun_uniform', border_mode='same'))
 model.add(Activation('relu'))
-model.add(Dropout(0.2))
-model.add(Dense(2, init='lecun_uniform'))
-model.add(Activation('linear'))
-adam = adam(lr=1e-5)
-model.compile(loss='mse', optimizer=adam)
+model.add(Convolution2D(64, 3, 3, subsample=(1,1),init='lecun_uniform', border_mode='same'))
+model.add(Activation('relu'))
+model.add(Flatten())
+model.add(Dense(512, init='lecun_uniform'))
+model.add(Activation('relu'))
+model.add(Dense(2,init='lecun_uniform'))
 
-#parametres
+adam = Adam(lr=1e-6)
+model.compile(loss='mse',optimizer=adam)
 
-epochs =20000 #combien de fois on joue
-gamma = .99 #discount
-epsilon = 1 #parametre probabilite
-lda =.99999 #parametre de decroissance de la probabilite
+#second model that i'm going to keep to predict the value of Q to take a decision, i'll update it less often that i'll train
+model_2 = model
 
-alpha=.1 #learning rate
-experience_replay=False
-batch_size=1000
+
+
+#buffer memory and batch size
+
+batch_size=32
 buffer_size=5000
-counter_replay=0
-not_full=True
-replay=np.zeros((buffer_size, 17+1+1+17))
 
 
-#quelques fonctions
+def get_background(image, state):
+    #take the bird out of the picture, in order to only get the background
+    image_without_bottom = image[50:,:405]
+    image_only_background = image_without_bottom
+    image_only_background[:50,int(state[0]):int(state[0])+25] = image_without_bottom[50:100,int(state[0]):int(state[0])+25]
+    return image_only_background
+
+def treat_image(image, background):
+    #take an image and background and gives the black and with image of what is not the background (bird and blocks)
+    image_without_background=(image[50:,:405]-background)
+    ind_blanc = image_without_background>0
+    image_treated = image_without_background
+    image_treated[ind_blanc] = 1
+    image_treated = ndimage.morphology.binary_closing(image_treated).astype(np.int)
+    image_treated = misc.imresize(image_treated,(60,100))
+    return image_treated
+
+
+state_game_memory = []
+fcounter_get_state = 0
+def game_get_state(game):
+    #this functions corrects the getGameState function of ple, that considered that one has passed the block as one passes the middle of it
+    global state_game_memory, fcounter_get_state
+    brut_state = form_state(game.getGameState())
+    if (brut_state[2]<8) and (fcounter_get_state==0):
+        fcounter_get_state=1
+        state_game_memory=brut_state
+    if (fcounter_get_state>0) and fcounter_get_state<19:
+        state_game=state_game_memory + np.array([0,0,8,0,0,8,0,0])*(19-fcounter_get_state+1)
+        state_game[0:1]=brut_state[0:1]
+        fcounter_get_state=(fcounter_get_state+1)%19
+        return state_game
+    if (fcounter_get_state==0) and not(brut_state[2]<8):
+        return brut_state + np.array([0,0,8,0,0,8,0,0])*19
+
+reward_fcounter=0
+def jeu_get_reward(p,action,game):
+    #modifies the reward function in ple, and shifts it in time as the previous function
+    global reward_fcounter
+    r =p.act(action)
+    raw_state = game_get_state(game)
+    if reward_fcounter>0 and reward_fcounter<12:
+
+        reward_fcounter=reward_fcounter+1
+        return (r==-5)*(-10) + (r==0)*2
+    if reward_fcounter==12:
+
+        reward_fcounter=0
+        return 10*(r==0)+(r==-5)*(-10)
+
+    if r==1:
+
+        reward_fcounter=1
+        return 2
+    if r==0:
+        if raw_state[0]>raw_state[3] and raw_state[0]<raw_state[4]-23:
+            return 2
+        else:
+            return -1
+    else:
+
+        return -10
+
 def form_state(dic):
+    #Take a dictionnary and returns a vector
     state=np.zeros(8)
     for key, value in dic.iteritems():
         if key=='player_y':
@@ -77,173 +145,143 @@ def form_state(dic):
     return state
 
 
-def heuristique(state):
-    r=np.random.rand()
-    if state[9]> state[13] and r>.05:
-        return 119
-    if state[9]< state[12]:
-        return None
-    if  state[9]> state[12] and r>1-((state[12]-state[9])/(state[12]-state[13]))*1 and state[11]>0:
-        return 119
-    if state[11]<10 and r>.9:
-        return 119
 
-    if state[9]< state[12] and r>.4:
-        return 119
+count_frames=0
+def replay_update(state,action,reward, new_state,gamma):
+    #this function deals with buffer and training
+    global count_frames
+    count_frames = count_frames+1
+    replay.append((state,action,reward, new_state))
+    n_events= len(replay)
+    if n_events>buffer_size:
+        replay.popleft()
+    if n_events>batch_size and count_frames%5==1:
+        minibatch = random.sample(replay, batch_size)
+        states_train = np.zeros((batch_size,4,60,100))
+        new_states_train = np.zeros((batch_size,4,60,100))
+        actions_train = np.zeros((batch_size,1))
+        rewards_train = np.zeros((batch_size,1))
+        for k in range(batch_size):
+            states_train[k:k+1,:,:,:]=minibatch[k][0]
+            new_states_train[k:k+1,:,:,:]=minibatch[k][3]
+            actions_train[k,0]=minibatch[k][1]
+            rewards_train[k,0]=minibatch[k][2]
+
+        Qnew = model_2.predict(new_states_train)
+        update = model_2.predict(states_train)
+        for k in range(batch_size):
+            if not rewards_train[k,0]==-10:
+                update[k,int(actions_train[k,0])]= rewards_train[k,0]+gamma*np.max(Qnew[k,:])
+            else:
+                update[k,int(actions_train[k,0])]=-10
+
+
+
+        history = model.fit(states_train, update, nb_epoch=1,verbose=0)
+
+        return history
     return None
 
-def play(p, model):
-    p.reset_game()
-    state = np.zeros(17)
-    reward = p.act(None)
-    new_state = update_state(p,0,state)
-    while not p.game_over():
 
-        state=new_state
-        q = model.predict(state.reshape((1, -1))).reshape(2)
-        act = None
-
-        #boucle de prise de decision
-        prob = np.random.rand()
-        if prob>epsilon:
-            action = int(np.argmax(q))
-            if action==1:
-                act=119
-        else:
-            act=heuristique(state)
-            action =int(action==119)
-
-        # action
-        reward = jeu_get_reward(p, act)
-
-        #combien de blocks on a passe
-        if reward==5:
-            count_blocks[j]=count_blocks[j]+1
-
-        #formation du nouveau etat
-        new_state =   update_state(p,action,state)
+## Main program block
 
 
-def jeu_get_reward(p,action):
-    r =p.act(action)
-    if r==1:
-        return 5
-    if r==0:
-        return 5/10
-    else:
-        return -5
+epochs =200000 
+gamma = .9 #discount
 
-def update_state(p, action, state):
-    # return etat dans la forme etat_t-1 action etat_t
-    raw_state = game.getGameState()
-    new_state = np.zeros(17)
-    new_state[9:] = form_state(raw_state)
-    new_state[8] = action
-    new_state[:8] = state[9:]
-    return new_state
+p=ps
 
-
-
-def replay_update(state,action,reward, new_state,verb):
-    global not_full, counter_replay
-    if not_full:
-
-        replay[counter_replay,0:17]=state
-        replay[counter_replay,17]=action
-        replay[counter_replay,18]=reward
-        replay[counter_replay,19:]=new_state
-        counter_replay = counter_replay + 1
-        not_full=(counter_replay<(buffer_size-1))
-        return None
-    else:
-        if counter_replay == buffer_size-1:
-            counter_replay=0
-        else:
-            counter_replay= counter_replay + 1
-        replay[counter_replay,0:17]=state
-        replay[counter_replay,17]=action
-        replay[counter_replay,18]=reward
-        replay[counter_replay,19:]=new_state
-        minibatch = np.array( random.sample(replay, batch_size))
-        old_states = minibatch[:,:17]
-        new_states =  minibatch[:,19:]
-        actions = minibatch[:,17]
-        rewards = minibatch[:,18]
-        Qs = model.predict(old_states)
-        newQs = model.predict(new_states)
-        X_train = old_states
-        y_train = np.zeros((batch_size, 2))
-        for k in range(len(rewards)):
-            maxQ = np.max(newQs[k,:])
-            y_train[k] = Qs[k,:]
-            if reward != -5: #non-terminal state
-                update = (reward + (gamma * maxQ))
-            else: #terminal state
-                update = reward
-            y_train[k,int(actions[k])] = update
-
-        model.fit(X_train, y_train, batch_size=batch_size, verbose=verb)
-        return None
-
-
-
-## start boucle apprentissage
+loss=[]
+replay = deque()
 q = np.zeros((2))
 count_blocks=np.zeros(epochs)
-state = np.zeros((17))
 action = 0
-
-p=pws
+epsilon =0.6
 for j in range(epochs):
-    if (j%50)==1:
-        print(epsilon   )
+
+    if (j%100)==1:
         p=ps
-        verbose=2
     else:
         p=pws
-        verbose=0
-    p.reset_game()
 
-    reward = p.act(None)
-    new_state = update_state(p,0,state)
+
+    p.reset_game()
+    reward = jeu_get_reward(p,None,game)
+
+
+    #get_background
+    raw_state =game_get_state(game)
+    img = p.getScreenGrayscale()
+    img = np.array(img)
+    background = get_background(img,raw_state)
+
+    img = treat_image(img, background)
+
+    new_state = np.stack((img,img,img,img), axis=0)
+    new_state = new_state.reshape(1, new_state.shape[0], new_state.shape[1], new_state.shape[2])
 
     while not p.game_over():
 
         state=new_state
-        q = model.predict(state.reshape((1, -1))).reshape(2)
-        act = None
-
-        #boucle de prise de decision
+        act=None
         prob = np.random.rand()
-        if prob>epsilon:
-            action = int(np.argmax(q))
-            if action==1:
-                act=119
+        
+        #decides if the action is going to be at random or not and chooses the action
+        if prob<epsilon:
+            action = int(prob<epsilon/2.0)
         else:
-            act=heuristique(state)
-            action =int(action==119)
+            action = np.argmax(model_2.predict(state).reshape(2))
+        act = (action==1)*119
 
         # action
-        reward = jeu_get_reward(p, act)
+        reward = jeu_get_reward(p, act, game)
 
-        #combien de blocks on a passe
-        if reward==5:
+        #count how many blocks we've passed in this game
+        if reward==10:
             count_blocks[j]=count_blocks[j]+1
 
-        #formation du nouveau etat
-        new_state =   update_state(p,action,state)
+        #update new state
+        raw_state = game_get_state(game)
+        img = p.getScreenGrayscale()
+        img = np.array(img)
+        img = treat_image(img, background)
+        img = img.reshape((1,1,60,100))
+        new_state = np.append(img, state[:, :3, :, :], axis=1)
+        
+        #update buffer and train
+        history = replay_update(state, action, reward, new_state, gamma)
+        
+        #eventually updates model2
+        if count_frames%100==1:
+            model_2 = model
 
-        replay_update(state, action, reward, new_state,verbose)
+        if history is not None:
+            loss+=history.history["loss"]
 
-    #affichage des resultats
-    if j%50==0:
-        print('epsilon =  %f', epsilon)
+
+
+    #Print of different informations
+    print(j)
+    if j%100==0:
+        print('Epsilon = ', epsilon)
         print('jumped blocks = ')
         print(np.mean(count_blocks[j-50:j]))
+        plt.close()
+        fig = plt.figure()
 
-    #mise a jour de la temperature
-    epsilon = lda*epsilon
-    if j%1000 == 0:
-        model.save("model_flappyv2.dqf")
-print('maintenant tout seul')
-play(ps, model)
+        ax1 = fig.add_subplot(211)
+        ax1.plot(loss)
+
+        ax2 = fig.add_subplot(212)
+        ax2.plot([np.mean(count_blocks[u-100:u]) for u in range(100,j)] )
+
+        plt.show(block=False)
+
+
+    #update epsilon
+    epsilon = epsilon - .6/float(epochs/2.0)
+    
+    #saves model
+    if j%200 == 1:
+        model.save("model_flappy_image.dqf")
+
