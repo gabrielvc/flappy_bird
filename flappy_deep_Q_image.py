@@ -48,10 +48,6 @@ model.add(Dense(2,init='lecun_uniform'))
 adam = Adam(lr=1e-6)
 model.compile(loss='mse',optimizer=adam)
 
-#second model that i'm going to keep to predict the value of Q to take a decision, i'll update it less often that i'll train
-model_2 = model
-
-
 
 #buffer memory and batch size
 
@@ -167,8 +163,8 @@ def replay_update(state,action,reward, new_state,gamma):
             actions_train[k,0]=minibatch[k][1]
             rewards_train[k,0]=minibatch[k][2]
 
-        Qnew = model_2.predict(new_states_train)
-        update = model_2.predict(states_train)
+        Qnew = model.predict(new_states_train)
+        update = model.predict(states_train)
         for k in range(batch_size):
             if not rewards_train[k,0]==-10:
                 update[k,int(actions_train[k,0])]= rewards_train[k,0]+gamma*np.max(Qnew[k,:])
@@ -251,10 +247,6 @@ for j in range(epochs):
         #update buffer and train
         history = replay_update(state, action, reward, new_state, gamma)
         
-        #eventually updates model2
-        if count_frames%100==1:
-            model_2 = model
-
         if history is not None:
             loss+=history.history["loss"]
 
