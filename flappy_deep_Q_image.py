@@ -10,8 +10,6 @@ from scipy import misc, ndimage
 
 from collections import deque
 from keras import initializations
-from keras.initializations import normal, identity
-from keras.models import model_from_json
 from keras.models import Sequential
 from keras.models import load_model
 from keras.layers.core import Dense, Dropout, Activation, Flatten
